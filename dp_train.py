@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from opacus import PrivacyEngine
+from opacus.accountants import RDPAccountant
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 from torch import nn
 from torch.utils.data import DataLoader
@@ -243,6 +244,9 @@ def main() -> None:
 
     elapsed = time.monotonic() - started
     epsilon = privacy_engine.get_epsilon(args.delta)
+    rdp_accountant = RDPAccountant()
+    rdp_accountant.history = [(args.noise_multiplier, sample_rate, update)]
+    epsilon_rdp = rdp_accountant.get_epsilon(delta=args.delta)
     summary = {
         "status": "complete",
         "steps": update,
@@ -251,6 +255,7 @@ def main() -> None:
         "max_grad_norm": args.max_grad_norm,
         "delta": args.delta,
         "epsilon_prv": epsilon,
+        "epsilon_rdp": epsilon_rdp,
         "elapsed_seconds": elapsed,
         "hyperparameters": serializable_args(args),
         "final": history[-1],
@@ -271,7 +276,7 @@ def main() -> None:
         args.output_dir / "checkpoint.pt",
     )
     print(
-        f"complete steps={update} epsilon={epsilon:.4f} delta={args.delta:g} "
+        f"complete steps={update} epsilon_prv={epsilon:.4f} epsilon_rdp={epsilon_rdp:.4f} delta={args.delta:g} "
         f"elapsed={elapsed / 60:.1f}min output={args.output_dir}",
         flush=True,
     )
