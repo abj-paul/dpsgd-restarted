@@ -7,6 +7,7 @@ import copy
 import json
 import random
 import time
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from model import WideResNet
+from gradient_collection import GradientCollector
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
@@ -48,6 +50,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--no-augmentation", action="store_true")
+    p.add_argument("--collect-gradients", action="store_true")
+    p.add_argument("--collection-remote", default="")
+    p.add_argument("--collection-batch-size", type=int, default=32)
+    p.add_argument("--collection-workers", type=int, default=4)
+    p.add_argument("--collection-limit", type=int, default=None,
+                   help="Smoke tests only; omit to collect all 50,000 examples.")
+    p.add_argument("--projection-seed", type=int, default=4275)
+    p.add_argument("--ntfy-topic", default="")
+    p.add_argument("--notify-every", type=int, default=10)
     return p.parse_args()
 
 
@@ -129,6 +140,20 @@ def serializable_args(args: argparse.Namespace) -> dict:
     }
 
 
+def notify(topic: str, message: str) -> None:
+    if not topic:
+        return
+    request = urllib.request.Request(
+        f"https://ntfy.sh/{topic}", data=message.encode("utf-8"), method="POST",
+        headers={"Title": "WRN gradient collection", "Tags": "chart_with_upwards_trend"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except Exception as exc:
+        print(f"ntfy notification failed: {exc}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
@@ -137,6 +162,10 @@ def main() -> None:
         raise ValueError("logical batch size must be in [1, 50000]")
     if args.physical_batch_size > args.logical_batch_size:
         raise ValueError("physical batch size cannot exceed logical batch size")
+    if args.collect_gradients and not args.collection_remote:
+        raise ValueError("--collection-remote is required when collecting gradients")
+    if args.collect_gradients and (args.depth, args.width, args.groups) != (16, 1, 16):
+        raise ValueError("projection allocation is specific to WRN-16-1, groups=16")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -167,6 +196,32 @@ def main() -> None:
         grad_sample_mode="ghost",
     )
 
+    collector = None
+    if args.collect_gradients:
+        collector = GradientCollector(
+            data_dir=args.data_dir,
+            output_dir=args.output_dir / "collection",
+            remote=args.collection_remote,
+            device=device,
+            projection_seed=args.projection_seed,
+            batch_size=args.collection_batch_size,
+            workers=args.collection_workers,
+            depth=args.depth,
+            width=args.width,
+            groups=args.groups,
+            limit=args.collection_limit,
+        )
+        collector.upload_initial({
+            "model": model._module.state_dict(),
+            "ema_model": ema_model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "python_rng": random.getstate(),
+            "numpy_rng": np.random.get_state(),
+            "torch_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state_all() if device.type == "cuda" else None,
+            "args": serializable_args(args),
+        })
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "config.json").write_text(
         json.dumps(serializable_args(args), indent=2) + "\n", encoding="utf-8"
@@ -180,6 +235,7 @@ def main() -> None:
         f"sigma={args.noise_multiplier} C={args.max_grad_norm}",
         flush=True,
     )
+    notify(args.ntfy_topic, f"Started WRN-{args.depth}-{args.width}: {args.steps} steps, q={sample_rate:.5f}, sigma={args.noise_multiplier}, delta={args.delta:g}; collection={'all 50,000' if args.collection_limit is None else args.collection_limit} examples/step.")
 
     started = time.monotonic()
     update = 0
@@ -223,6 +279,29 @@ def main() -> None:
                     metrics["ema_test_loss"] = test_loss
                     metrics["ema_test_accuracy"] = test_accuracy
                     model.train()
+                if collector is not None:
+                    checkpoint = {
+                        "step": update,
+                        "model": model._module.state_dict(),
+                        "ema_model": ema_model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "accountant": privacy_engine.accountant.state_dict(),
+                        "python_rng": random.getstate(),
+                        "numpy_rng": np.random.get_state(),
+                        "torch_rng": torch.get_rng_state(),
+                        "cuda_rng": torch.cuda.get_rng_state_all() if device.type == "cuda" else None,
+                        "metrics": metrics,
+                    }
+                    collection = collector.collect(
+                        step=update, trained_model=model._module, checkpoint=checkpoint
+                    )
+                    metrics["collection_seconds"] = collection["elapsed_seconds"]
+                    print(
+                        f"collected step={update:04d} examples={collection['examples']} "
+                        f"seconds={collection['elapsed_seconds']:.1f}", flush=True,
+                    )
+                    if update == 1 or update % args.notify_every == 0:
+                        notify(args.ntfy_topic, f"Step {update}/{args.steps}: collected {collection['examples']:,} gradients; eps={epsilon:.3f}; elapsed={(time.monotonic()-started)/60:.1f} min. Shards upload asynchronously.")
                 history.append(metrics)
                 if update % args.log_every == 0 or update == 1:
                     seen = sum(item["logical_examples"] for item in history)
@@ -241,6 +320,9 @@ def main() -> None:
                     )
                 if update >= args.steps:
                     break
+
+    if collector is not None:
+        collector.finish()
 
     elapsed = time.monotonic() - started
     epsilon = privacy_engine.get_epsilon(args.delta)
