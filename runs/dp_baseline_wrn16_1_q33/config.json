@@ -1,0 +1,22 @@
+{
+  "data_dir": "data",
+  "output_dir": "runs/dp_baseline_wrn16_1_q33",
+  "steps": 500,
+  "logical_batch_size": 16667,
+  "physical_batch_size": 2048,
+  "test_batch_size": 1000,
+  "lr": 4.0,
+  "noise_multiplier": 5.0,
+  "max_grad_norm": 1.0,
+  "delta": 1e-05,
+  "depth": 16,
+  "width": 1,
+  "groups": 16,
+  "ema_decay": 0.9999,
+  "eval_every": 50,
+  "log_every": 5,
+  "workers": 8,
+  "seed": 0,
+  "device": "cuda",
+  "no_augmentation": false
+}
