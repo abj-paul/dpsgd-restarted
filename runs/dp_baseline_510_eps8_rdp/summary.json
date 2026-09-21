@@ -1,0 +1,43 @@
+{
+  "status": "complete",
+  "steps": 510,
+  "sample_rate": 0.3333333333333333,
+  "noise_multiplier": 4.888246618,
+  "max_grad_norm": 1.0,
+  "delta": 1e-05,
+  "epsilon_prv": 7.433064708180238,
+  "epsilon_rdp": 7.9999999328736715,
+  "elapsed_seconds": 2345.016387104999,
+  "hyperparameters": {
+    "data_dir": "data",
+    "output_dir": "runs/dp_baseline_510_eps8_rdp",
+    "steps": 510,
+    "logical_batch_size": 16667,
+    "physical_batch_size": 2048,
+    "test_batch_size": 1000,
+    "lr": 4.0,
+    "noise_multiplier": 4.888246618,
+    "max_grad_norm": 1.0,
+    "delta": 1e-05,
+    "depth": 16,
+    "width": 1,
+    "groups": 16,
+    "ema_decay": 0.9999,
+    "eval_every": 50,
+    "log_every": 5,
+    "workers": 8,
+    "seed": 0,
+    "device": "cuda",
+    "no_augmentation": false
+  },
+  "final": {
+    "step": 510,
+    "train_loss": 1.3897382557815356,
+    "train_accuracy": 0.5882777710915874,
+    "logical_examples": 16618,
+    "epsilon_prv": 7.433064708180238,
+    "elapsed_seconds": 2344.510825087,
+    "ema_test_loss": 1.2738709106445312,
+    "ema_test_accuracy": 0.6103
+  }
+}
