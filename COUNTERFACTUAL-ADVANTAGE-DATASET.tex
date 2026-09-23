@@ -1,0 +1,229 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,enumitem,microtype}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\CE}{\operatorname{CE}}
+\newcommand{\Normal}{\mathcal{N}}
+\newcommand{\Dpub}{D_{\mathrm{pub}}}
+\newcommand{\Dupd}{D_{\mathrm{upd}}}
+\newcommand{\Dprobe}{D_{\mathrm{probe}}}
+
+\title{Plan for a Counterfactual Clipping-Advantage Dataset}
+\author{WRN-16-1 / CIFAR-10 DP-SGD experiment}
+\date{23 September 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document specifies a one-step counterfactual dataset for learning a
+per-example adaptive clipping policy. Starting from each of 5,100 stored
+DP-SGD checkpoints, two reproducible Poisson batches are drawn from a declared
+public subset of CIFAR-10. Two examples per batch are selected as anchors. A
+baseline update with clipping norm one is compared with updates in which only
+one anchor uses either a low or a high clipping value. The label is the paired
+change in cross-entropy on a disjoint public probe set. The resulting dataset
+contains exactly 40,800 rows.
+\end{abstract}
+
+\section{Inputs and privacy premise}
+
+Let $D$ be the 50,000-example CIFAR-10 training set. There are $L=10$
+independent runs and $T=510$ stored post-update checkpoints per run:
+\[
+  \Theta=\{\theta_{s,\ell}:s\in\{1,\ldots,T\},
+  \ell\in\{0,\ldots,L-1\}\}.
+\]
+The original configuration is WRN-16-1, $q=1/3$, clipping norm $C=1$,
+noise multiplier $\sigma=4.888246618$, learning rate $\eta=4.0$, no momentum,
+and no weight decay. The source collection is specified in
+\texttt{DATA-COLLECTION.md}.
+
+A fixed 10\% subset
+\[
+  \Dpub\subset D,\qquad |\Dpub|=5{,}000,
+\]
+is declared public side information before construction. Its indices and
+selection seed are recorded. Only examples, labels, gradients, and histories
+belonging to $\Dpub$ may be used. The remaining 45,000 examples and their
+saved per-example features are out of scope.
+
+The public subset is partitioned once into disjoint sets
+\[
+  \Dpub=\Dupd\mathbin{\dot\cup}\Dprobe,
+  \qquad |\Dupd|=n_{\mathrm{upd}}=4{,}000,
+  \qquad |\Dprobe|=n_{\mathrm{probe}}=1{,}000.
+\]
+$\Dupd$ supplies counterfactual update batches and anchors. $\Dprobe$ is used
+only for the probe loss and never belongs to a counterfactual update batch.
+The split is class-stratified, and its seed and exact indices are recorded.
+
+The privacy premise is that the checkpoint transcript $\Theta$ is an
+$(\varepsilon,\delta)$-DP release with respect to the non-public records. Under
+this premise, the construction is post-processing of $\Theta$, public data,
+and data-independent randomness, and incurs no additional privacy loss for the
+non-public records. This conclusion does not hold if the builder accesses
+stored gradients or histories of non-public examples.
+
+\section{Sampling design}
+
+For every checkpoint $(s,\ell)$, draw two independent Poisson batches:
+\[
+  \mathcal{B}_{s\ell r}
+  =\{j\in\Dupd:Z_{s\ell rj}=1\},
+  \qquad Z_{s\ell rj}\sim\operatorname{Bernoulli}(q),
+  \qquad q=\frac13,\quad r\in\{1,2\}.
+\]
+Therefore
+\[
+  \mathbb{E}|\mathcal{B}_{s\ell r}|=q|\Dupd|
+  =4{,}000/3.
+\]
+The seeds vary with $(s,\ell,r)$ and are derived deterministically from a
+master seed. The two batches may overlap.
+
+For each batch select $b=2$ distinct anchors uniformly without replacement:
+\[
+  I_{s\ell r}=\{i_{s\ell r1},i_{s\ell r2}\}
+  \subset\mathcal{B}_{s\ell r}.
+\]
+The action set is
+\[
+  \mathcal{C}=\{C_{\mathrm{low}},C_{\mathrm{high}}\}=\{0.25,0.75\}.
+\]
+The baseline and both actions obey the global cap
+$C_{\mathrm{cap}}=1$.
+
+\section{Paired counterfactual}
+
+For a per-example gradient $g_j(\theta)$, define
+\[
+  \clip(g_j,C)=g_j\min\left\{1,\frac{C}{\|g_j\|_2}\right\}.
+\]
+Let $N=50{,}000$ denote the deployment population size. The public batch
+estimates the background clipped mean,
+\[
+  \overline G_{s\ell r}^{(1)}
+  =\frac{1}{q n_{\mathrm{upd}}}
+    \sum_{j\in\mathcal B_{s\ell r}}\clip(g_j(\theta_{s,\ell}),1).
+\]
+The noise retains the original deployment scale:
+\[
+  \xi_{s\ell r}\sim\Normal(0,\sigma^2C_{\mathrm{cap}}^2I),
+  \qquad
+  \theta_{s\ell r}^{(1)}
+  =\theta_{s,\ell}-\eta\left(
+      \overline G_{s\ell r}^{(1)}+\frac{\xi_{s\ell r}}{qN}
+    \right).
+\]
+For anchor $i\in I_{s\ell r}$ and action $a\in\mathcal C$, define the
+one-record deployment-scale perturbation
+\[
+  \Delta G_{s\ell ria}
+  =\frac{\clip(g_i(\theta_{s,\ell}),a)
+          -\clip(g_i(\theta_{s,\ell}),1)}{qN},
+  \qquad
+  \theta_{s\ell r}^{(i,a)}
+  =\theta_{s\ell r}^{(1)}-\eta\Delta G_{s\ell ria}.
+\]
+Thus the 4,000 public update examples estimate the background direction, while
+the individual action and DP noise retain their original $N=50{,}000$ scale.
+The baseline and counterfactuals use identical batch membership,
+augmentations, optimizer state, and Gaussian noise. Different $(s,\ell,r)$
+tuples use different recorded seeds.
+
+The independent public probe objective is
+\[
+  L_{\mathrm{probe}}(\theta)
+  =\frac{1}{|\Dprobe|}
+    \sum_{(x,y)\in\Dprobe}\CE(f_\theta(x),y),
+\]
+evaluated on canonical, non-augmented examples. The paired advantage is
+\[
+  A_{s\ell ria}
+  =L_{\mathrm{probe}}\!\left(\theta_{s\ell r}^{(1)}\right)
+   -L_{\mathrm{probe}}\!\left(\theta_{s\ell r}^{(i,a)}\right).
+\]
+Thus $A>0$ is a reward, $A<0$ is a penalty, and $A=0$ is neutral. The baseline
+next state is computed once per $(s,\ell,r)$ and shared by four
+counterfactuals. All temporary next states are discarded after evaluation.
+
+A diagnostic subset additionally uses $a=1$. Its advantage must be numerically
+zero under the paired-randomness protocol.
+
+\section{Rows and dataset size}
+
+The stored checkpoint index is $s$. A logical decision at $t=s+1$ is recorded
+as
+\[
+  (\theta_{t-1,\ell},h_i^{1:t-1},a,A_{ita})
+  =(\theta_{s,\ell},h_i^{1:s},a,A_{s\ell ria}).
+\]
+$h_i^{1:s}$ references the existing sequence of 4,275-dimensional projected
+gradients and six exact block norms for public anchor $i$. Checkpoints and
+histories are referenced, not copied into every row.
+
+The number of primary rows is
+\[
+  L\,T\,(2\ \text{batches})\,(b\ \text{anchors})\,|\mathcal C|
+  =10\cdot510\cdot2\cdot2\cdot2
+  =\boxed{40{,}800}.
+\]
+
+Each row stores at least
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Field & Meaning \\
+\midrule
+\texttt{run\_id}, \texttt{checkpoint\_step} & Key for $\theta_{s,\ell}$ \\
+\texttt{checkpoint\_uri}, \texttt{history\_ref} & Feature references \\
+\texttt{batch\_replicate}, \texttt{anchor\_slot} & $r\in\{1,2\}$ and anchor 1 or 2 \\
+\texttt{example\_id}, \texttt{candidate\_clip} & Public anchor and action $a$ \\
+\texttt{baseline\_probe\_ce} & $L_{\mathrm{probe}}(\theta^{(1)})$ \\
+\texttt{candidate\_probe\_ce} & $L_{\mathrm{probe}}(\theta^{(i,a)})$ \\
+\texttt{advantage\_raw} & $A_{s\ell ria}$ \\
+\texttt{batch\_seed}, \texttt{augmentation\_seed}, \texttt{noise\_seed} & RNG metadata \\
+\texttt{public\_split\_hash} & Identity of $\Dupd$ and $\Dprobe$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+All 40,800 primary rows are retained without filtering by sign or magnitude.
+
+\section{Post-construction scaling}
+
+The raw advantage is authoritative. After construction, define
+\[
+  s_A=\operatorname{median}_{s,\ell,r,i,a}|A_{s\ell ria}|,
+  \qquad
+  \widetilde A_{s\ell ria}
+  =\frac{A_{s\ell ria}}{s_A+10^{-12}}.
+\]
+This single global multiplier improves numerical scale without changing signs
+or action rankings. Store $A$, $\widetilde A$, and $s_A$. Do not rescale
+separately by step or run.
+
+\section{Validation and limitations}
+
+Before full construction, verify:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item $\Dupd\cap\Dprobe=\varnothing$ and
+        $\Dupd\cup\Dprobe=\Dpub$;
+  \item every anchor belongs to its recorded batch and to $\Dupd$;
+  \item only declared-public sample indices are accessed;
+  \item paired baseline and counterfactual RNG states agree exactly;
+  \item diagnostic action $a=1$ has zero advantage to numerical tolerance;
+  \item recorded seeds reproduce sampled indices and labels.
+\end{enumerate}
+
+The label is a local, one-step marginal advantage around the $C=1$ policy; it
+does not identify the long-horizon return of changing many clipping decisions.
+The fixed public probe loss is the stated optimization target, not an estimate
+of performance on an unseen test distribution. Two actions do not identify an
+optimal continuous clipping value. Any learned policy must therefore be
+evaluated in fresh end-to-end DP-SGD runs.
+
+\end{document}
