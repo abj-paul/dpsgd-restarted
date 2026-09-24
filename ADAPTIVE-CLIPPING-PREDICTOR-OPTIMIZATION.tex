@@ -1,0 +1,206 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=0.66in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,enumitem,microtype}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\BCE}{\operatorname{BCE}}
+\newcommand{\1}{\mathbf{1}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\setlist{nosep,leftmargin=*}
+
+\title{Constrained Adaptive Per-Sample Clipping Predictor}
+\author{WRN-16-1 / CIFAR-10 DP-SGD}
+\date{24 September 2026}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\part*{I. Theoretical optimization}
+
+\paragraph{Constants.}
+\[
+T=510,\qquad T'=2T=1020,\qquad K=8,\qquad
+C_L=0.25,\quad C_H=C_{\mathrm{base}}=1,
+\]
+\[
+q=\frac13,\qquad (\varepsilon,\delta)=(8,10^{-5}),\qquad
+N=45{,}000.
+\]
+
+\paragraph{Causal policy.}
+For update $t>K$ and sampled record $i$, let
+\[
+x_{t,i}=\left(u_t,H_{t,i},\frac{t}{T'}\right),\qquad
+u_t=R_w\operatorname{vec}(w_t)\in\R^{512},
+\]
+\[
+R_w[a,b]\overset{\mathrm{iid}}{\sim}\mathcal N(0,1/512),\qquad
+H_{t,i}=\left\{(z_i^\tau,\log(1+\nu_i^\tau))\right\}_{\tau=t-K}^{t-1}
+\in\R^{K\times4281}.
+\]
+Here $z_i^\tau\in\R^{4275}$ is the fixed gradient projection and
+$\nu_i^\tau\in\R^6$ contains exact block norms. Define
+\[
+p_{t,i}=\pi_\theta(x_{t,i}),\qquad
+B_{t,i}\sim\operatorname{Bernoulli}(p_{t,i}),\qquad
+C_{t,i}=C_LB_{t,i}+C_H(1-B_{t,i}).
+\]
+For $t\le K$, set $C_{t,i}=C_H$.
+
+\paragraph{DP-SGD mechanism.}
+With independent Poisson indicators $S_i^t\sim\operatorname{Bernoulli}(q)$,
+\[
+\bar g_t=\frac{1}{qN}\left[
+\sum_{i=1}^{N}S_i^t\clip(g_i^t,C_{t,i})+Z_t\right],
+\qquad Z_t\sim\mathcal N(0,\sigma^2C_H^2I),
+\]
+\[
+w_{t+1}=w_t-\eta_t\bar g_t,
+\qquad \clip(g,C)=g\min\left\{1,\frac{C}{\lVert g\rVert_2}\right\}.
+\]
+$\sigma$ is calibrated for $(q,T',\varepsilon,\delta)$; noise always uses
+$C_H=1$.
+
+\paragraph{Advantage-weighted policy loss.}
+For predictor row $j$, with measured advantage $A_j=L_j^H-L_j^L$,
+\[
+y_j=\1\{A_j>0\},\qquad
+s_A=\operatorname{median}_j|A_j|=4.868945805\times10^{-5},\qquad
+\omega_j=\frac{|A_j|}{s_A+10^{-12}},
+\]
+\[
+\mathcal L_{\mathrm{pred}}(\theta)=
+\frac{\sum_{j=1}^{M}\omega_j\,
+\BCE\!\left(y_j,\pi_\theta(x_j)\right)}
+{\sum_{j=1}^{M}\omega_j+10^{-12}}.
+\]
+
+\paragraph{Population clipping budget.}
+\[
+\frac1N\sum_{i=1}^{N}\E_{\pi,S}
+\left[\sum_{t=1}^{T'}S_i^tC_{t,i}^2\right]
+\le qT C_{\mathrm{base}}^2=qT.
+\]
+The first $K$ high-clipping updates consume $K$ units. Hence the controlled
+horizon obeys
+\[
+\frac{1}{T'-K}\sum_{t=K+1}^{T'}\E_\pi[C_{t,i}^2]
+\le\beta_K,qquad
+\beta_K=\frac{T-K}{T'-K}=\frac{502}{1012}\approx0.496047.
+\]
+Since $\E[C^2]=C_L^2p+C_H^2(1-p)$, define
+\[
+g(\theta)=\frac1M\sum_{j=1}^{M}
+\left[0.0625\,p_j+(1-p_j)\right]-\beta_K\le0,
+\qquad p_j=\pi_\theta(x_j).
+\]
+Equivalently, $M^{-1}\sum_jp_j\ge0.53755$.
+
+\paragraph{Constrained problem.}
+\[
+\boxed{
+\min_\theta\max_{\lambda\ge0}
+\ \mathcal L_{\mathrm{pred}}(\theta)+\lambda g(\theta)
+}
+\]
+\[
+\theta\leftarrow\theta-\eta_\theta\nabla_\theta
+\left(\mathcal L_{\mathrm{pred}}+\lambda g\right),
+\qquad
+\lambda\leftarrow\left[\lambda+\eta_\lambda g(\theta)\right]_+.
+\]
+
+\part*{II. Operational specification}
+
+\paragraph{Feature materialization.}
+\begin{enumerate}
+  \item Fix and record $R_w$, its seed, parameter ordering, and FP32 dtype.
+  Project all $5{,}100$ checkpoints to $u\in\R^{512}$.
+  \item For each labeled row with checkpoint $s\ge K$, retrieve the last $K$
+  gradient sketches and block norms; group reads by \texttt{(run, step)}.
+  \item Fit every feature transform on runs $0$--$7$ only. Store sketches in
+  BF16; convert minibatches to FP32. Exclude rows with $s<K$.
+\end{enumerate}
+
+\paragraph{Predictor.}
+\[
+e_i^\tau=\operatorname{GELU}
+\left(W_z z_i^\tau+W_\nu\log(1+\nu_i^\tau)+b\right)\in\R^{128},
+\]
+\[
+e_j^h=\operatorname{GRU}_{128}(e_i^{s-K+1:s}),\qquad
+e_j^w=\operatorname{MLP}_{512\to128\to64}(u_s),
+\]
+\[
+p_j=\operatorname{sigmoid}\!\left(
+\operatorname{MLP}_{193\to64\to1}
+[e_j^h,e_j^w,(s+1)/T']\right).
+\]
+
+\paragraph{Split and training.}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Split & Runs & Rows before warm-up removal & Rows with $s\ge8$ \\
+\midrule
+Train & $0$--$7$ & $16{,}320$ & $16{,}096$ \\
+Validation & $8$ & $2{,}040$ & $2{,}012$ \\
+Test & $9$ & $2{,}040$ & $2{,}012$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+For every epoch:
+\begin{enumerate}
+  \item update $\theta$ by predictor minibatches;
+  \item evaluate $g(\theta)$ on the complete training split;
+  \item update $\lambda$ once and project it to $[0,\lambda_{\max}]$;
+  \item retain feasible checkpoints, $g(\theta)\le\epsilon_g$.
+\end{enumerate}
+Select the feasible checkpoint maximizing validation policy value. Never tune
+on run $9$.
+
+\paragraph{Offline evaluation.}
+\[
+\widehat V(\pi)=\frac1M\sum_jA_j\1\{C_j=C_L\},\qquad
+\widehat R(\pi)=\frac1M\sum_j
+\left[\max(A_j,0)-A_j\1\{C_j=C_L\}\right].
+\]
+Evaluate (i) $C_j\sim\pi_\theta(\cdot\mid x_j)$ over repeated policy seeds and
+(ii) deterministic $C_j=C_L$ iff $p_j\ge\tfrac12$. Report $\widehat V$,
+$\widehat R$, weighted accuracy, low-action rate, mean $C^2$, and $g(\theta)$.
+
+\paragraph{Online adaptive run.}
+Maintain a rolling $K$-step history for all $45{,}000$ private records. At
+each update: project $w_t$; Poisson-sample; score sampled records; sample
+$C_{t,i}$; apply the DP-SGD update; sweep canonical private examples at
+$w_{t+1}$; append projections and norms; discard history older than $K$.
+Probabilities, actions, gradients, and histories remain internal.
+
+\paragraph{Paired end-to-end comparison.}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & Basic DP-SGD & Predictor DP-SGD \\
+\midrule
+Private train set & CIFAR-10 $45{,}000$ & same \\
+Public predictor set & unused for updates & CIFAR-10 $5{,}000$ \\
+Updates / sampling & $T'=1020$, $q=1/3$ & same \\
+Clipping & $C=1$ & $C=1$ for $t\le8$; then $\pi_\theta$ \\
+Noise & calibrated to $(8,10^{-5})$ & identical $\sigma$, $C_H=1$ \\
+Randomness & paired seeds & paired seeds \\
+Evaluation & CIFAR-10 test $10{,}000$ & same \\
+\bottomrule
+\end{tabular}
+\end{center}
+Pair initialization, Poisson batches, augmentation, optimizer schedule, and
+Gaussian-noise streams. Primary endpoints: final/best EMA test accuracy and
+cross-entropy. Also report privacy accountants, learning curves, realized
+action rates, mean $C^2$, budget violation, and runtime.
+
+\end{document}
